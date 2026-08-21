@@ -1,0 +1,21 @@
+# Tooling configuration only. The bot is run as a module, not installed as a
+# package, so there is no build section here on purpose.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "C4", "UP", "SIM", "RUF", "BLE"]
+# BLE001 is on so that every broad except has to be justified with a noqa and
+# a comment saying why. There are two, both deliberate.
+
+[tool.ruff.lint.per-file-ignores]
+# Test doubles mirror the shapes discord.py hands over; readability there beats
+# line length, and the fixtures shadow their own names by design.
+"tests/*" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning:discord.player"]

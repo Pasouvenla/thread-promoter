@@ -1,0 +1,41 @@
+# Secrets come in by ${...} substitution rather than an env_file: directive.
+# Substitution honours a file passed with --env-file, which is what lets a
+# deployment tool hand over a decrypted .env; env_file: ignores it and injects
+# the file into the container as it stands, encrypted or not.
+services:
+  thread-promoter:
+    build: .
+    container_name: thread-promoter
+    restart: unless-stopped
+    environment:
+      DISCORD_TOKEN: ${DISCORD_TOKEN:?DISCORD_TOKEN is required}
+      DISCORD_GUILD_IDS: ${DISCORD_GUILD_IDS:-}
+      PROMOTER_MESSAGE_DELAY: ${PROMOTER_MESSAGE_DELAY:-2.0}
+      PROMOTER_REACTION_DELAY: ${PROMOTER_REACTION_DELAY:-0.30}
+      PROMOTER_REPLAY_REACTIONS: ${PROMOTER_REPLAY_REACTIONS:-false}
+      PROMOTER_REPLAY_ATTACHMENTS: ${PROMOTER_REPLAY_ATTACHMENTS:-true}
+      PROMOTER_KEEP_ATTACHMENT_COPIES: ${PROMOTER_KEEP_ATTACHMENT_COPIES:-true}
+      PROMOTER_PROGRESS_EVERY: ${PROMOTER_PROGRESS_EVERY:-25}
+      TZ: ${TZ:-Europe/Paris}
+    volumes:
+      # Conversation content, attachment bytes and a live webhook token. Keep it
+      # out of the backup jobs and purge it once a migration is validated.
+      # Defaults to a named volume; set PROMOTER_DATA to a host path to bind
+      # mount instead. That path must belong to the container uid.
+      - ${PROMOTER_DATA:-promoter-data}:/data
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  promoter-data:

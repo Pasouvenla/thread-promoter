@@ -1,0 +1,10 @@
+.env
+docker-compose.override.yml
+data/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+venv/
+.DS_Store

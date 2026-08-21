@@ -1,0 +1,11 @@
+image: python:3.12-slim
+
+stages: [test]
+
+test:
+  stage: test
+  before_script:
+    - pip install --no-cache-dir -r requirements.txt pytest ruff
+  script:
+    - ruff check app tests
+    - python -m pytest -q
