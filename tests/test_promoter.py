@@ -206,7 +206,14 @@ def test_an_unreadable_attachment_is_reported_rather_than_dropped(bot, config, t
     assert "broken.png" in body and "read failed" in body
 
 
-def test_a_reply_outside_the_thread_is_labelled(bot, config, thread, invoker, guild):
+def test_an_unresolved_reply_points_at_the_original_without_guessing(
+    bot, config, thread, invoker, guild
+):
+    """Unresolved covers three cases and we cannot tell them apart.
+
+    Outside the thread, not replayed yet, or deleted since: claiming the first
+    one is a guess, and it reads as if a message were missing.
+    """
     author = FakeAuthor(2, "alice")
     thread.messages.append(
         FakeMessage(2003, author, "answer", channel_id=thread.id,
@@ -216,7 +223,9 @@ def test_a_reply_outside_the_thread_is_labelled(bot, config, thread, invoker, gu
     run(promoter.run())
 
     body = "\n".join(call.get("content") or "" for call in guild.channel.webhook.sent)
-    assert "Replying to" in body
+    assert "In reply to" in body
+    assert "outside this thread" not in body, "that asserts more than we know"
+    assert f"/{thread.id}/999999" in body, "it should link to the original"
 
 
 def test_a_reply_inside_the_thread_points_at_the_replayed_copy(bot, config, thread, invoker, guild):
@@ -907,3 +916,70 @@ def test_a_batched_checkpoint_still_resumes_without_duplicating(bot, config, thr
 
     assert replayed_source_ids(guild.channel) == avant, "a lagging checkpoint caused a re-replay"
     assert second.checkpoint.id_map, "the id map should have been rebuilt from the channel"
+
+
+def test_the_channel_is_created_closed(bot, config, thread, invoker, guild):
+    """Thirty thousand messages into an open channel floods a whole server.
+
+    Silent sends suppress the push notification, not the unread badge, so the
+    only real answer is to keep the door shut while the replay runs.
+    """
+    populate(thread, 3)
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+
+    overwrites = guild.created_channels[0]["overwrites"]
+    assert overwrites[guild.default_role].view_channel is False, "everyone can see it"
+    assert overwrites[guild.me].view_channel is True, "the bot must see its own channel"
+
+
+def test_the_invoker_can_see_what_they_asked_for(bot, config, thread, invoker, guild):
+    populate(thread, 2)
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+
+    overwrites = guild.created_channels[0]["overwrites"]
+    vus = [o for o in overwrites if getattr(o, "id", None) == invoker.id]
+    assert vus, "whoever ran the command should see the result"
+    assert overwrites[vus[0]].view_channel is True
+
+
+def test_a_chosen_role_gets_access_during_the_replay(bot, config, thread, invoker, guild):
+    role = FakeAuthor(555, "Admins")
+    populate(thread, 2)
+    promoter = make_promoter(bot, config, thread, invoker, visible_to=role)
+    run(promoter.prepare())
+
+    overwrites = guild.created_channels[0]["overwrites"]
+    assert role in overwrites and overwrites[role].view_channel is True
+
+
+def test_progress_reports_a_share_of_the_whole(bot, config, thread, invoker):
+    """Without a denominator you cannot tell 0.3% from 90%, which cost a run."""
+    populate(thread, 4)
+    thread.message_count = 1000
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.run())
+
+    ligne = promoter.status_line("Replay in progress:")
+    assert "of about 1000" in ligne
+    assert "%" in ligne
+
+
+def test_progress_counts_what_a_previous_run_had_done(bot, config, thread, invoker, guild):
+    populate(thread, 6)
+    thread.message_count = 6
+    run(make_promoter(bot, config, thread, invoker).run())
+
+    second = make_promoter(bot, config, thread, invoker)
+    run(second.run())
+    ligne = second.status_line("Replay complete:")
+    assert "6 of about 6" in ligne, f"a resume restarted the count: {ligne}"
+
+
+def test_progress_stays_usable_without_a_count(bot, config, thread, invoker):
+    populate(thread, 2)
+    thread.message_count = None
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.run())
+    assert "message(s) replayed" in promoter.status_line("Replay in progress:")

@@ -105,6 +105,7 @@ def reply_line(
     message: discord.Message,
     resolved_url: str | None,
     resolved_author: str | None,
+    source_url: str | None = None,
 ) -> str | None:
     """Webhooks cannot emit native replies, and replies never cross channels.
 
@@ -127,7 +128,13 @@ def reply_line(
             extract = extract[:120] + ("..." if len(extract) > 120 else "")
             return f"-# Replying to **{referenced.author.display_name}**: {extract}"
         return f"-# Replying to **{referenced.author.display_name}**"
-    return "-# Replying to a message outside this thread"
+    # Discord did not resolve the target and it has not been replayed yet. That
+    # covers three different situations, a message outside the thread, one not
+    # replayed yet, and one deleted since, and nothing here can tell them
+    # apart. Point at the original rather than assert which one it is.
+    if source_url:
+        return f"-# In reply to [a message in the original thread]({source_url})"
+    return "-# In reply to another message"
 
 
 def reaction_line(reactions: list[dict]) -> str | None:

@@ -125,6 +125,7 @@ class ThreadPromoter:
         *,
         target_name: str | None = None,
         full_replay: bool = True,
+        visible_to: discord.Role | None = None,
     ) -> None:
         self.bot = bot
         self.config = config
@@ -132,6 +133,7 @@ class ThreadPromoter:
         self.invoker = invoker
         self.target_name = target_name
         self.full_replay = full_replay
+        self.visible_to = visible_to
 
         self.store = CheckpointStore(config.state_dir)
         self.checkpoint: Checkpoint = self.store.load(thread.id, thread.guild.id)
@@ -146,6 +148,9 @@ class ThreadPromoter:
         # one is to kill the container mid-message.
         self.abort_requested = False
         self.rate_limits = ratelimit.install()
+        # Messages already in the channel before this run started, so a resume
+        # reports overall progress rather than restarting the count at zero.
+        self.already_replayed = 0
 
     def request_abort(self) -> None:
         """Ask the replay to stop at the next message boundary.
@@ -194,8 +199,36 @@ class ThreadPromoter:
         return channel
 
     def _target_overwrites(self) -> dict:
-        parent = self.thread.parent
-        overwrites = dict(parent.overwrites)
+        """Start closed, so a replay does not flood a whole server.
+
+        Pouring thirty thousand messages into an open channel marks it unread
+        for everyone, for hours. Messages go out silent, which suppresses the
+        push notification but not the unread badge, so the only real answer is
+        to keep the door shut while the replay runs.
+
+        Inheriting the parent's overwrites happens at the end, when a human
+        decides the channel is ready. Until then only the bot, whoever asked
+        for the promotion, and one chosen role can see it.
+        """
+        guild = self.thread.guild
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=False),
+        }
+        me = guild.me
+        if me is not None:
+            overwrites[me] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, manage_messages=True,
+                manage_webhooks=True, embed_links=True, attach_files=True,
+                add_reactions=True, read_message_history=True,
+            )
+        invoker = guild.get_member(self.invoker.id) or self.invoker
+        overwrites[invoker] = discord.PermissionOverwrite(
+            view_channel=True, send_messages=True, read_message_history=True
+        )
+        if self.visible_to is not None:
+            overwrites[self.visible_to] = discord.PermissionOverwrite(
+                view_channel=True, send_messages=True, read_message_history=True
+            )
         return overwrites
 
     async def _private_overwrites(self, overwrites: dict) -> dict:
@@ -232,6 +265,8 @@ class ThreadPromoter:
         name = slugify_channel_name(self.target_name or self.thread.name)
         overwrites = self._target_overwrites()
         if self.thread.is_private():
+            # A private thread's participants are carried over so they keep
+            # access once the channel is opened up.
             overwrites = await self._private_overwrites(overwrites)
 
         topic = (
@@ -404,6 +439,9 @@ class ThreadPromoter:
 
         return files, lost
 
+    def _source_jump_url(self, source_id: int) -> str:
+        return f"{self._source_url()}/{source_id}"
+
     def _new_jump_url(self, new_id: int) -> str:
         return (
             f"https://discord.com/channels/{self.thread.guild.id}/"
@@ -420,6 +458,7 @@ class ThreadPromoter:
             message,
             self._new_jump_url(mapped) if mapped else None,
             self.author_labels.get(referenced_id) if referenced_id else None,
+            self._source_jump_url(referenced_id) if referenced_id else None,
         )
         if line:
             prefix.append(line)
@@ -968,6 +1007,14 @@ class ThreadPromoter:
             value=f"<t:{int(self._thread_created_at().timestamp())}:D>",
         )
         embed.add_field(name="Promoted by", value=self.invoker.mention)
+        if self.full_replay:
+            qui = self.visible_to.mention if self.visible_to is not None else "nobody else yet"
+            embed.add_field(
+                name="Visible to",
+                value=f"{self.invoker.mention} and {qui}. Open it to the server "
+                      f"from the channel permissions once the replay is done.",
+                inline=False,
+            )
         embed.add_field(name="Status", value=status, inline=False)
         embed.set_footer(text=f"Source thread: {self.thread.id}")
         return embed
@@ -999,8 +1046,27 @@ class ThreadPromoter:
         except Exception:
             log.debug("Status update skipped", exc_info=True)
 
+    def _expected_total(self) -> int | None:
+        """How many messages the thread holds, as Discord counts them.
+
+        Free: it comes with the thread object, no extra pass over the history.
+        Approximate, since it excludes deleted messages and Discord stops
+        counting precisely past a point, which is why the progress line says
+        "about".
+        """
+        if self.checkpoint.source_total:
+            return self.checkpoint.source_total
+        compte = getattr(self.thread, "message_count", None)
+        return compte or None
+
     def status_line(self, prefix: str) -> str:
-        line = f"{prefix} {self.progress.sent} message(s) replayed"
+        fait = self.progress.sent + self.progress.skipped + self.already_replayed
+        total = self._expected_total()
+        if total:
+            pct = min(100, round(fait * 100 / total))
+            line = f"{prefix} {fait} of about {total} message(s), {pct}%"
+        else:
+            line = f"{prefix} {fait} message(s) replayed"
         if self.progress.attachments:
             line += f", {self.progress.attachments} attachment(s)"
         if self.progress.reactions:
@@ -1126,7 +1192,10 @@ class ThreadPromoter:
         resume_after = await self._reconcile_with_channel()
         if resume_after is not None:
             log.info("Resuming after source message %s", resume_after)
+            self.already_replayed = len(self.checkpoint.id_map)
         self.checkpoint.last_source_id = resume_after
+        if not self.checkpoint.source_total:
+            self.checkpoint.source_total = getattr(self.thread, "message_count", None)
 
         self.manifest.set_header(
             thread={

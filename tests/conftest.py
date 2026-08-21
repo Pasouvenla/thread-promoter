@@ -294,6 +294,7 @@ class FakeThread:
         self.messages: list[FakeMessage] = []
         self._private = False
         self.pins_forbidden = False
+        self.message_count = None
 
     def is_private(self) -> bool:
         return self._private

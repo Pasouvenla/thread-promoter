@@ -20,6 +20,7 @@ author's username and avatar. One slash command, run from the thread itself.
 ## Features
 
 - **Faithful replay**: usernames, avatars, attachments, stickers, embeds, polls and pins, re-emitted in order through a webhook
+- **Starts closed**: the channel is created visible to you alone, plus one role you choose, so a long replay does not mark a channel unread for the whole server. You open it when you are happy with the result
 - **Read-only source**: nothing is ever written to the original thread. That is what makes an unsatisfying run repeatable, since you can delete the target channel and start over
 - **Preview before committing**: `/promote-preview` shows what a replay would produce, and creates nothing at all
 - **Resumable**: an interrupted run picks up where it stopped, reading the target channel rather than trusting a stored cursor
@@ -92,7 +93,7 @@ Channels permission on the caller.
 | Command | What it does |
 |---|---|
 | `/promote-preview` | Shows what a replay would produce. Creates nothing |
-| `/promote [name]` | Creates the channel and replays the full history |
+| `/promote [name] [visible_to]` | Creates the channel **closed** and replays the full history |
 | `/promote-link [name]` | Creates the channel, links back to the thread, replays nothing |
 | `/promote-abort` | Stops a running replay at the next message boundary |
 | `/promote-resume` | Continues an interrupted migration |
@@ -152,6 +153,22 @@ headroom. Those numbers come from documentation rather than measurement, so the
 bot counts the rate limits discord.py absorbs on its behalf and reports them in
 the progress header and the manifest. Tune the pacing on that, not on this
 paragraph.
+
+## The channel starts closed
+
+Pouring thirty thousand messages into an open channel marks it unread for
+everyone, for hours. Messages are sent silent, which suppresses the push
+notification but not the unread badge, so the only real answer is to keep the
+door shut while the replay runs.
+
+`/promote` therefore creates the channel visible to the bot, to whoever ran the
+command, and to the role passed as `visible_to`, nothing more. The header says
+so, and opening it to the server is done from the channel permissions once you
+have looked at the result. That is deliberately a human decision rather than
+something the bot does on its own.
+
+A private thread's participants are carried over as overwrites, so they keep
+their access once the channel is opened.
 
 ## How resuming works
 

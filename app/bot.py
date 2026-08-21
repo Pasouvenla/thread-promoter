@@ -163,6 +163,7 @@ async def _launch(
     *,
     name: str | None,
     full_replay: bool,
+    visible_to: discord.Role | None = None,
 ) -> None:
     try:
         thread = _preflight(interaction)
@@ -178,9 +179,12 @@ async def _launch(
 
     try:
         await interaction.response.send_message(
-            "Promotion started. Progress is reported in the new channel. On a "
-            "large thread the run can take tens of minutes because of Discord "
-            "rate limits. The source thread is left untouched.",
+            "Promotion started. Progress is reported in the new channel, which "
+            "starts closed so the replay does not flood the server: open it "
+            "from the channel permissions once you are happy with it. On a "
+            "large thread the run takes hours because of Discord rate limits, "
+            "and `/promote-abort` stops it cleanly. The source thread is left "
+            "untouched.",
             ephemeral=True,
         )
     except discord.HTTPException:
@@ -199,6 +203,7 @@ async def _launch(
                 interaction.user,
                 target_name=name,
                 full_replay=full_replay,
+                visible_to=visible_to,
             )
             bot.active[thread.id] = promoter
             channel = await promoter.run()
@@ -233,11 +238,19 @@ def register(bot: PromoterBot) -> None:
         name="promote",
         description="Convert this thread into a dedicated channel, replaying the full history.",
     )
-    @app_commands.describe(name="Name of the channel to create (defaults to the thread name).")
+    @app_commands.describe(
+        name="Name of the channel to create (defaults to the thread name).",
+        visible_to="Role allowed to see the channel during the replay. "
+                   "Nobody but you if left empty.",
+    )
     @app_commands.checks.has_permissions(manage_channels=True)
     @app_commands.guild_only()
-    async def promote(interaction: discord.Interaction, name: str | None = None) -> None:
-        await _launch(bot, interaction, name=name, full_replay=True)
+    async def promote(
+        interaction: discord.Interaction,
+        name: str | None = None,
+        visible_to: discord.Role | None = None,
+    ) -> None:
+        await _launch(bot, interaction, name=name, full_replay=True, visible_to=visible_to)
 
     @bot.tree.command(
         name="promote-link",
