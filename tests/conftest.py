@@ -99,6 +99,7 @@ class FakeMessage:
         pinned: bool = False,
         guild_id: int = 500,
         channel_id: int = 900,
+        webhook_id: int | None = None,
     ) -> None:
         self.id = message_id
         self.author = author
@@ -113,6 +114,7 @@ class FakeMessage:
         self.reference = reference
         self.pinned = pinned
         self.flags = FakeFlags()
+        self.webhook_id = webhook_id
         self.jump_url = f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
 
@@ -239,6 +241,25 @@ class FakeGuild:
         return FakeAuthor(member_id, f"member{member_id}")
 
 
+class FakeIntegrationWebhook:
+    """A webhook belonging to the parent channel, as an integration would own."""
+
+    def __init__(self, webhook_id: int, name: str, owner: str | None = None) -> None:
+        self.id = webhook_id
+        self.name = name
+        self.user = FakeAuthor(webhook_id, owner) if owner else None
+        self.channel = None
+        self.edits: list[dict] = []
+        self.fail = False
+
+    async def edit(self, **kwargs):
+        if self.fail:
+            raise discord.HTTPException(_Response(400), "refused")
+        self.edits.append(kwargs)
+        self.channel = kwargs.get("channel")
+        return self
+
+
 class FakeParent:
     def __init__(self, guild: FakeGuild) -> None:
         self.name = "general"
@@ -247,6 +268,13 @@ class FakeParent:
         self.overwrites = {}
         self.guild = guild
         self.starter: FakeMessage | None = None
+        self.hooks: list[FakeIntegrationWebhook] = []
+        self.hooks_forbidden = False
+
+    async def webhooks(self):
+        if self.hooks_forbidden:
+            raise discord.Forbidden(_Response(403), "no manage_webhooks")
+        return self.hooks
 
     async def fetch_message(self, message_id: int) -> FakeMessage:
         if self.starter is None:

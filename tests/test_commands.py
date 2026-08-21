@@ -27,6 +27,7 @@ EXPECTED = {
     "promote-verify",
     "promote-export",
     "promote-preview",
+    "promote-webhooks",
     "promote-abort",
     "promote-forget",
 }
@@ -89,3 +90,71 @@ def test_durations_are_readable_at_both_ends(seconds, expected):
     from app.bot import format_duration
 
     assert format_duration(seconds) == expected
+
+
+def test_the_webhook_selector_needs_two_deliberate_steps():
+    """Migrating is not reversible from the UI, so a misclick must not fire it."""
+    from app.views import WebhookMigrationView
+
+    candidates = [
+        {"id": 111, "name": "Dofus Bot", "messages": 12, "owner": "dofus", "gone": False},
+        {"id": 222, "name": "Other", "messages": 3, "owner": None, "gone": False},
+    ]
+    view = WebhookMigrationView(1, candidates, lambda i, c: None)
+
+    selects = [c for c in view.children if isinstance(c, discord.ui.Select)]
+    buttons = [c for c in view.children if isinstance(c, discord.ui.Button)]
+    assert len(selects) == 1
+    assert len(buttons) == 2, "a confirm and a way out"
+    assert view.chosen == [], "nothing is selected until the operator selects it"
+
+
+def test_the_selector_allows_picking_a_subset():
+    from app.views import WebhookMigrationView
+
+    candidates = [
+        {"id": i, "name": f"hook {i}", "messages": i, "owner": None, "gone": False}
+        for i in range(1, 5)
+    ]
+    view = WebhookMigrationView(1, candidates, lambda i, c: None)
+    select = next(c for c in view.children if isinstance(c, discord.ui.Select))
+    assert select.min_values == 0 and select.max_values == 4
+    assert [o.value for o in select.options] == ["1", "2", "3", "4"]
+
+
+def test_the_selector_stays_within_the_discord_cap():
+    from app.views import WebhookMigrationView
+
+    candidates = [
+        {"id": i, "name": f"hook {i}", "messages": 1, "owner": None, "gone": False}
+        for i in range(40)
+    ]
+    view = WebhookMigrationView(1, candidates, lambda i, c: None)
+    select = next(c for c in view.children if isinstance(c, discord.ui.Select))
+    assert len(select.options) == 25, "Discord refuses more than 25 options"
+
+
+def test_the_report_warns_about_thread_id():
+    """The one thing that breaks after a migration, said before it happens."""
+    from app.views import webhook_report
+
+    embed = webhook_report(
+        [{"id": 111, "name": "Dofus Bot", "messages": 4, "owner": "dofus", "gone": False}],
+        "promoted-channel",
+    )
+    description = embed.description
+    # The mechanism, the exception, and what happens to whoever ignores it.
+    assert "URL" in description and "no reconfiguration" in description
+    assert "thread_id" in description
+    assert "drop" in description and "failing" in description, (
+        "naming thread_id is not enough: the report must say what breaks"
+    )
+    assert "promoted-channel" in description
+    assert "Dofus Bot" in embed.fields[0].name
+
+
+def test_the_report_flags_a_webhook_that_cannot_be_moved():
+    from app.views import webhook_report
+
+    embed = webhook_report([{"id": 9, "name": "Gone", "messages": 1, "gone": True}], "x")
+    assert "no longer exists" in embed.fields[0].value

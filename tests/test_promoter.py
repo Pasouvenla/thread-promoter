@@ -713,3 +713,102 @@ def test_reactions_can_be_turned_back_on(bot, config, thread, invoker, guild):
 def test_the_shipped_default_keeps_reactions_off(config):
     """Pinned so a later refactor cannot quietly flip it back."""
     assert config.replay_reactions is False
+
+
+def _hook(promoter_id, name, owner=None):
+    from conftest import FakeIntegrationWebhook
+
+    return FakeIntegrationWebhook(promoter_id, name, owner)
+
+
+def test_only_webhooks_that_posted_here_are_offered(bot, config, thread, invoker):
+    """A webhook on the parent channel that never posted here is not ours to move."""
+    author = FakeAuthor(2, "alice")
+    thread.messages.append(FakeMessage(5000, author, "from a bot", channel_id=thread.id, webhook_id=111))
+    populate(thread, 2)
+    thread.parent.hooks = [
+        _hook(111, "Dofus Bot", "dofus-store-watch"),
+        _hook(222, "Some other integration", "unrelated"),
+    ]
+
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+    found = run(promoter.discover_webhooks())
+
+    assert [f["id"] for f in found] == [111]
+    assert found[0]["name"] == "Dofus Bot"
+    assert found[0]["owner"] == "dofus-store-watch#0001"
+    assert found[0]["messages"] == 1
+
+
+def test_webhooks_are_ordered_by_how_much_they_posted(bot, config, thread, invoker):
+    author = FakeAuthor(2, "alice")
+    for i in range(4):
+        thread.messages.append(FakeMessage(5100 + i, author, "a", channel_id=thread.id, webhook_id=222))
+    thread.messages.append(FakeMessage(5200, author, "b", channel_id=thread.id, webhook_id=111))
+    thread.parent.hooks = [_hook(111, "Quiet"), _hook(222, "Chatty")]
+
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+    found = run(promoter.discover_webhooks())
+    assert [f["name"] for f in found] == ["Chatty", "Quiet"]
+
+
+def test_a_deleted_webhook_is_reported_rather_than_hidden(bot, config, thread, invoker):
+    author = FakeAuthor(2, "alice")
+    thread.messages.append(FakeMessage(5300, author, "x", channel_id=thread.id, webhook_id=999))
+    thread.parent.hooks = []
+
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+    found = run(promoter.discover_webhooks())
+    assert len(found) == 1 and found[0]["gone"] is True
+
+
+def test_no_webhook_means_nothing_to_offer(bot, config, thread, invoker):
+    populate(thread, 3)
+    thread.parent.hooks = [_hook(111, "Unused")]
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+    assert run(promoter.discover_webhooks()) == []
+
+
+def test_missing_permission_says_which_one(bot, config, thread, invoker):
+    author = FakeAuthor(2, "alice")
+    thread.messages.append(FakeMessage(5400, author, "x", channel_id=thread.id, webhook_id=111))
+    thread.parent.hooks_forbidden = True
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+    with pytest.raises(PromotionError, match="Manage Webhooks"):
+        run(promoter.discover_webhooks())
+
+
+def test_migrating_moves_the_webhook_and_keeps_its_identity(bot, config, thread, invoker, guild):
+    """Editing the channel preserves id and token, so the URL keeps working."""
+    hook = _hook(111, "Dofus Bot", "dofus-store-watch")
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+    run(promoter.migrate_webhook(hook))
+
+    assert hook.edits, "the webhook was not edited"
+    assert hook.edits[0]["channel"] is guild.channel
+    assert hook.id == 111, "the id must not change, the URL depends on it"
+    assert str(thread.id) in hook.edits[0]["reason"]
+
+
+def test_migrating_without_a_target_channel_refuses(bot, config, thread, invoker):
+    promoter = make_promoter(bot, config, thread, invoker)
+    with pytest.raises(PromotionError):
+        run(promoter.migrate_webhook(_hook(111, "Dofus Bot")))
+
+
+def test_discovery_does_not_write_to_the_source_thread(bot, config, thread, invoker):
+    author = FakeAuthor(2, "alice")
+    thread.messages.append(FakeMessage(5500, author, "x", channel_id=thread.id, webhook_id=111))
+    thread.parent.hooks = [_hook(111, "Dofus Bot")]
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+    try:
+        run(promoter.discover_webhooks())
+    except ThreadWriteAttempt as exc:  # pragma: no cover
+        pytest.fail(str(exc))

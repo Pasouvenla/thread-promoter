@@ -28,6 +28,7 @@ author's username and avatar. One slash command, run from the thread itself.
 - **Nothing lost in silence**: anything that cannot cross over is stated under the message concerned and recorded in a manifest
 - **Repairable failures**: a failed message holds its slot with a placeholder, and a single choice at the end repairs the whole set in place
 - **Rate limit aware**: paced emission, and it counts the throttling discord.py absorbs so you can tune the pacing on evidence
+- **Integrations follow**: `/promote-webhooks` moves the webhooks that actually published in the thread, keeping their URLs so the calling service needs no reconfiguration
 - **Self-hosted**: one container, read-only root, no database, no telemetry
 
 ## Limitations
@@ -96,6 +97,7 @@ Channels permission on the caller.
 | `/promote-abort` | Stops a running replay at the next message boundary |
 | `/promote-resume` | Continues an interrupted migration |
 | `/promote-verify` | Counts both sides and reports what is missing |
+| `/promote-webhooks` | Moves the integrations that posted here into the new channel |
 | `/promote-recover` | Re-opens the recovery choice for messages that failed |
 | `/promote-export` | Renders the manifest as an HTML page |
 | `/promote-forget` | Clears the checkpoint, touching no channel |
@@ -104,6 +106,27 @@ Channels permission on the caller.
 no rate limiting, no fidelity loss, because nothing is copied. Reach for
 `/promote` when the content genuinely has to live in a real channel, for
 instance to attach an integration that does not work on threads.
+
+## Moving integrations
+
+A webhook belongs to a channel, not to a thread: `thread_id` is a parameter of
+the call, not a property of the webhook. There is therefore no way to ask
+Discord which webhooks serve a thread. But every message names its emitter, so
+`/promote-webhooks` reads the thread and offers only the webhooks that actually
+published in it, with the owning application and how many messages each posted.
+
+Moving one preserves its id and its token, so **the URL keeps working and the
+calling service needs no reconfiguration**.
+
+With one exception, which the command states before you confirm: a caller that
+passes `thread_id` explicitly targets this thread, and the thread will not
+belong to the new channel. Those callers must drop `thread_id`, or they start
+failing. If your integration posts to `https://discord.com/api/webhooks/.../...?thread_id=123`,
+that parameter has to go.
+
+A bot that posts as itself rather than through a webhook needs nothing: the new
+channel inherits the parent's permission overwrites, so its access follows on
+its own.
 
 ## Configuration
 

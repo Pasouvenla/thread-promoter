@@ -88,6 +88,112 @@ class RecoveryView(discord.ui.View):
         await self._choose(interaction, LEAVE)
 
 
+class WebhookMigrationView(discord.ui.View):
+    """Pick which webhooks follow the conversation into the new channel.
+
+    Two steps rather than one: the select records a choice, the button acts on
+    it. Migrating is not reversible from here, and a select that fired on
+    change would move an integration on a misclick.
+    """
+
+    def __init__(
+        self,
+        invoker_id: int,
+        candidates: list[dict],
+        callback: Callable[[discord.Interaction, list[int]], Awaitable[None]],
+        *,
+        timeout: float = 600.0,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.invoker_id = invoker_id
+        self.callback = callback
+        self.chosen: list[int] = []
+
+        options = []
+        for entry in candidates[:25]:
+            label = entry.get("name") or f"webhook {entry['id']}"
+            detail = f"{entry['messages']} message(s)"
+            if entry.get("owner"):
+                detail += f", owned by {entry['owner']}"
+            options.append(
+                discord.SelectOption(
+                    label=label[:100],
+                    value=str(entry["id"]),
+                    description=detail[:100],
+                )
+            )
+
+        self.select = discord.ui.Select(
+            placeholder="Webhooks to move into the new channel",
+            min_values=0,
+            max_values=len(options),
+            options=options,
+        )
+        self.select.callback = self._on_select
+        self.add_item(self.select)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.invoker_id:
+            await interaction.response.send_message(
+                "Only the person who ran the command can choose.", ephemeral=True
+            )
+            return False
+        return True
+
+    async def _on_select(self, interaction: discord.Interaction) -> None:
+        self.chosen = [int(v) for v in self.select.values]
+        await interaction.response.defer()
+
+    @discord.ui.button(label="Move selected", style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        if not self.chosen:
+            await interaction.response.send_message(
+                "Nothing selected, nothing moved.", ephemeral=True
+            )
+            return
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(view=self)
+        self.stop()
+        await self.callback(interaction, self.chosen)
+
+    @discord.ui.button(label="Leave them", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, _: discord.ui.Button) -> None:
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(
+            content="Left untouched. The integrations keep posting where they do now.",
+            view=self,
+        )
+        self.stop()
+
+
+def webhook_report(candidates: list[dict], channel_name: str) -> discord.Embed:
+    """List what published in the thread, and what moving it costs."""
+    embed = discord.Embed(
+        title=f"{len(candidates)} webhook(s) published in this thread",
+        description=(
+            f"Moving one into **#{channel_name}** keeps its URL intact, so the "
+            "service that calls it needs no reconfiguration.\n\n"
+            "**One exception**: a caller that passes `thread_id` in its request "
+            "targets this thread explicitly, and that thread will not belong to "
+            "the new channel. Those callers must drop `thread_id` or they will "
+            "start failing."
+        ),
+    )
+    for entry in candidates[:10]:
+        name = entry.get("name") or f"webhook {entry['id']}"
+        lines = [f"{entry['messages']} message(s) in this thread"]
+        if entry.get("owner"):
+            lines.append(f"owned by {entry['owner']}")
+        if entry.get("gone"):
+            lines.append("**no longer exists, cannot be moved**")
+        embed.add_field(name=name[:256], value="\n".join(lines)[:1024], inline=False)
+    if len(candidates) > 10:
+        embed.set_footer(text=f"and {len(candidates) - 10} more")
+    return embed
+
+
 def _fit(lines: list[str], footer: str | None, limit: int = EMBED_FIELD_LIMIT) -> str:
     """Pack whole entries into the field, keeping the footer that says so.
 

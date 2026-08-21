@@ -18,6 +18,7 @@ from discord.ext import commands
 from .config import Config
 from .export import export_manifest, render_manifest
 from .promoter import PromotionError, ThreadPromoter
+from .views import WebhookMigrationView, webhook_report
 from .state import CheckpointStore
 
 logging.basicConfig(
@@ -435,6 +436,75 @@ def register(bot: PromoterBot) -> None:
         )
 
     @bot.tree.command(
+        name="promote-webhooks",
+        description="Move the integrations that posted in this thread into the promoted channel.",
+    )
+    @app_commands.checks.has_permissions(manage_channels=True)
+    @app_commands.guild_only()
+    async def promote_webhooks(interaction: discord.Interaction) -> None:
+        try:
+            thread = _preflight(interaction)
+        except PromotionError as exc:
+            await interaction.response.send_message(str(exc), ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            promoter = ThreadPromoter(bot, bot.config, thread, interaction.user)
+            await promoter.attach()
+            candidates = await promoter.discover_webhooks()
+        except PromotionError as exc:
+            await interaction.followup.send(str(exc), ephemeral=True)
+            return
+
+        if not candidates:
+            await interaction.followup.send(
+                "No webhook has published in this thread, so there is nothing "
+                "to move. A bot posting as itself rather than through a webhook "
+                "needs no migration: the new channel inherits the parent's "
+                "permissions, so its access follows on its own.",
+                ephemeral=True,
+            )
+            return
+
+        movable = [c for c in candidates if not c["gone"]]
+
+        async def apply(inner: discord.Interaction, chosen: list[int]) -> None:
+            by_id = {c["id"]: c for c in candidates}
+            moved, failed = [], []
+            for webhook_id in chosen:
+                entry = by_id.get(webhook_id)
+                if entry is None or entry["gone"]:
+                    failed.append((str(webhook_id), "no longer exists"))
+                    continue
+                try:
+                    await promoter.migrate_webhook(entry["webhook"])
+                    moved.append(entry.get("name") or str(webhook_id))
+                except (discord.HTTPException, discord.Forbidden) as exc:
+                    failed.append((entry.get("name") or str(webhook_id), str(exc)))
+
+            lines = []
+            if moved:
+                lines.append(f"Moved into {promoter.channel.mention}: " + ", ".join(moved))
+                lines.append(
+                    "Their URLs are unchanged. Any caller passing `thread_id` "
+                    "must now drop it, or it will keep targeting a thread that "
+                    "no longer belongs to that channel."
+                )
+            for name, reason in failed:
+                lines.append(f"Failed on {name}: {reason}")
+            try:
+                await inner.followup.send("\n".join(lines), ephemeral=True)
+            except discord.HTTPException:
+                log.warning("Webhook migration summary could not be delivered")
+
+        await interaction.followup.send(
+            embed=webhook_report(candidates, promoter.channel.name),
+            view=WebhookMigrationView(interaction.user.id, movable, apply),
+            ephemeral=True,
+        )
+
+    @bot.tree.command(
         name="promote-forget",
         description="Clear the resume checkpoint for this thread, leaving channels untouched.",
     )
@@ -455,6 +525,7 @@ def register(bot: PromoterBot) -> None:
     @promote_recover.error
     @promote_verify.error
     @promote_export.error
+    @promote_webhooks.error
     @promote_preview.error
     @promote_abort.error
     @promote_forget.error

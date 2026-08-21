@@ -796,6 +796,70 @@ class ThreadPromoter:
             "unknown_in_target": len(replayed - source_ids),
         }
 
+    # --------------------------------------------------------------- webhooks
+
+    async def discover_webhooks(self) -> list[dict]:
+        """Find the webhooks that actually published in this thread.
+
+        A webhook has no idea it targets a thread: thread_id is a parameter of
+        the call, not a property of the webhook, so there is no way to ask
+        Discord which webhooks serve a thread. But every message names its
+        emitter through webhook_id, so reading the thread answers the question
+        from evidence rather than from guesswork.
+
+        Webhooks that exist on the parent channel but never posted here are
+        deliberately left out: migrating one would move an integration that has
+        nothing to do with this thread.
+        """
+        counts: dict[int, int] = {}
+        async for message in self._iter_source(None):
+            if message.webhook_id:
+                counts[message.webhook_id] = counts.get(message.webhook_id, 0) + 1
+        if not counts:
+            return []
+
+        try:
+            live = {hook.id: hook for hook in await self.thread.parent.webhooks()}
+        except discord.Forbidden as exc:
+            raise PromotionError(
+                "Reading the webhooks of the parent channel needs the Manage "
+                "Webhooks permission there."
+            ) from exc
+
+        found: list[dict] = []
+        for webhook_id, count in sorted(counts.items(), key=lambda kv: -kv[1]):
+            hook = live.get(webhook_id)
+            found.append(
+                {
+                    "id": webhook_id,
+                    "webhook": hook,
+                    "messages": count,
+                    "name": hook.name if hook else None,
+                    # The application that owns the webhook, when Discord tells
+                    # us. This is what lets an operator recognise which of three
+                    # identically named webhooks is the one they care about.
+                    "owner": str(hook.user) if hook and hook.user else None,
+                    "gone": hook is None,
+                }
+            )
+        return found
+
+    async def migrate_webhook(self, webhook: discord.Webhook) -> None:
+        """Move a webhook to the promoted channel, keeping its URL.
+
+        Editing channel_id preserves the id and the token, so the URL the
+        emitting service holds keeps working and nothing has to be
+        reconfigured on that side. With one exception, see the warning the
+        command prints: a caller that passes thread_id explicitly still routes
+        to a thread that no longer belongs to this channel.
+        """
+        if self.channel is None:
+            raise PromotionError("No target channel to migrate a webhook into.")
+        await webhook.edit(
+            channel=self.channel,
+            reason=f"Thread {self.thread.id} promoted to {self.channel.id}",
+        )
+
     # ---------------------------------------------------------------- preview
 
     async def preview(self) -> dict:
