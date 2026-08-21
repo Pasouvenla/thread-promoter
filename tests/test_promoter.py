@@ -983,3 +983,55 @@ def test_progress_stays_usable_without_a_count(bot, config, thread, invoker):
     promoter = make_promoter(bot, config, thread, invoker)
     run(promoter.run())
     assert "message(s) replayed" in promoter.status_line("Replay in progress:")
+
+
+def test_messages_posted_during_the_replay_are_picked_up(bot, config, thread, invoker, guild):
+    """A sixteen hour replay runs while people keep talking in the thread.
+
+    Each page of history is fetched when the cursor reaches it, and a new
+    message always has a higher snowflake than the cursor, so it lands in a
+    later page rather than being missed.
+    """
+    author = FakeAuthor(2, "alice")
+    populate(thread, 5)
+    promoter = make_promoter(bot, config, thread, invoker)
+
+    original = promoter._replay_one
+    arrive = {"fait": False}
+
+    async def pendant(message, index):
+        await original(message, index)
+        if not arrive["fait"] and promoter.progress.sent == 2:
+            # Someone posts while the replay is halfway through.
+            thread.messages.append(
+                FakeMessage(9999, author, "posted mid-replay", channel_id=thread.id)
+            )
+            arrive["fait"] = True
+
+    promoter._replay_one = pendant
+    run(promoter.run())
+
+    assert 9999 in replayed_source_ids(guild.channel), "a live message was missed"
+    body = "\n".join(c.get("content") or "" for c in guild.channel.webhook.sent)
+    assert "posted mid-replay" in body
+
+
+def test_history_is_read_page_by_page_not_all_at_once(bot, config, thread, invoker):
+    """Buffering the whole history would defeat both streaming and catch-up."""
+    populate(thread, 250)
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+
+    vus = []
+
+    async def collecte():
+        async for message in promoter._iter_source(None):
+            vus.append(message.id)
+            if len(vus) == 150:
+                thread.messages.append(
+                    FakeMessage(99999, FakeAuthor(2, "alice"), "late", channel_id=thread.id)
+                )
+
+    run(collecte())
+    assert 99999 in vus, "a message added after page one was never seen"
+    assert len(vus) == 251

@@ -260,11 +260,23 @@ class FakeIntegrationWebhook:
         return self
 
 
+class FakeCategory:
+    """Where the new channel lands, and where Manage Channels must hold."""
+
+    def __init__(self, name: str = "Text Channels", manage: bool = True) -> None:
+        self.name = name
+        self.id = 4242
+        self.manage = manage
+
+    def permissions_for(self, _member):
+        return discord.Permissions(manage_channels=self.manage, view_channel=True)
+
+
 class FakeParent:
     def __init__(self, guild: FakeGuild) -> None:
         self.name = "general"
         self.mention = "<#42>"
-        self.category = None
+        self.category = FakeCategory()
         self.overwrites = {}
         self.guild = guild
         self.starter: FakeMessage | None = None
@@ -282,8 +294,14 @@ class FakeParent:
         return self.starter
 
 
-class FakeThread:
-    """The source. Every write method is a tripwire."""
+class FakeThread(discord.Thread):
+    """The source. Every write method is a tripwire.
+
+    Subclasses the real type because the preflight checks isinstance before
+    anything else; a double that sidesteps it would never reach the code under
+    test. parent and created_at are read-only properties on the real class,
+    hence the setters below.
+    """
 
     def __init__(self, guild: FakeGuild, thread_id: int = 800) -> None:
         self.id = thread_id
@@ -295,6 +313,22 @@ class FakeThread:
         self._private = False
         self.pins_forbidden = False
         self.message_count = None
+
+    @property
+    def parent(self):
+        return self._parent
+
+    @parent.setter
+    def parent(self, value):
+        self._parent = value
+
+    @property
+    def created_at(self):
+        return self._created_at
+
+    @created_at.setter
+    def created_at(self, value):
+        self._created_at = value
 
     def is_private(self) -> bool:
         return self._private
@@ -322,15 +356,41 @@ class FakeThread:
                 return message
         raise discord.NotFound(_Response(404), "unknown message")
 
+    HISTORY_PAGE = 100
+
     def history(self, limit=None, after=None, oldest_first: bool = True):
-        selected = [m for m in self.messages if after is None or m.id > after.id]
-        if not oldest_first:
-            selected = list(reversed(selected))
+        """Paginates like the real API: each page is read when it is needed.
+
+        Building the whole list up front would hide the property that matters
+        here, that messages posted while a replay runs are picked up when the
+        cursor reaches them.
+        """
+        depart = after.id if after is not None else 0
 
         async def gen():
-            for message in selected:
-                yield message
+            curseur = depart
+            rendus = 0
+            while True:
+                page = [m for m in sorted(self.messages, key=lambda x: x.id)
+                        if m.id > curseur][: self.HISTORY_PAGE]
+                if not page:
+                    return
+                for message in page:
+                    yield message
+                    rendus += 1
+                    curseur = message.id
+                    if limit is not None and rendus >= limit:
+                        return
 
+        if not oldest_first:
+            async def rev():
+                tout = sorted(self.messages, key=lambda x: x.id, reverse=True)
+                if limit is not None:
+                    tout = tout[:limit]
+                for message in tout:
+                    yield message
+
+            return rev()
         return gen()
 
     # Tripwires. The source thread is strictly read-only.

@@ -135,7 +135,22 @@ def format_duration(seconds: float) -> str:
     return f"{hours}h{minutes:02d}"
 
 
+def _missing_permissions(granted: discord.Permissions) -> list[str]:
+    return [
+        PERMISSION_LABELS.get(name, name)
+        for name, value in REQUIRED_BOT_PERMISSIONS
+        if value and not getattr(granted, name)
+    ]
+
+
 def _preflight(interaction: discord.Interaction) -> discord.Thread:
+    """Check the permissions where they will actually be used.
+
+    Checking only the thread is how a run gets a green light and then dies on
+    a 403 from create_text_channel with nothing to explain it: creating a
+    channel inside a category needs Manage Channels on that category, which is
+    a different set of overwrites from the thread's.
+    """
     channel = interaction.channel
     if not isinstance(channel, discord.Thread):
         raise PromotionError("This command must be run from inside a thread.")
@@ -146,14 +161,30 @@ def _preflight(interaction: discord.Interaction) -> discord.Thread:
     if me is None:
         raise PromotionError("Bot member object unavailable, cannot check permissions.")
 
-    granted = channel.permissions_for(me)
-    missing = [
-        PERMISSION_LABELS.get(name, name)
-        for name, value in REQUIRED_BOT_PERMISSIONS
-        if value and not getattr(granted, name)
-    ]
+    missing = _missing_permissions(channel.permissions_for(me))
     if missing:
-        raise PromotionError("Missing bot permissions: " + ", ".join(missing))
+        raise PromotionError(
+            f"Missing bot permissions on this thread: {', '.join(missing)}"
+        )
+
+    # The new channel is created in the parent's category, so that is where
+    # Manage Channels has to hold. Naming the category matters: an operator
+    # otherwise looks at the thread, sees the permission, and finds nothing.
+    category = channel.parent.category
+    if category is not None:
+        if not category.permissions_for(me).manage_channels:
+            raise PromotionError(
+                f"I can act in this thread, but I cannot create a channel in the "
+                f"category **{category.name}**, which is where the new channel "
+                f"would go. Grant Manage Channels to the bot on that category, "
+                f"or move the parent channel out of it."
+            )
+    elif not interaction.guild.me.guild_permissions.manage_channels:
+        raise PromotionError(
+            "The parent channel is not in a category, so the new channel would "
+            "be created at server level, which needs Manage Channels on the "
+            "server itself."
+        )
     return channel
 
 
