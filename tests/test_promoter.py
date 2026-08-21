@@ -812,3 +812,98 @@ def test_discovery_does_not_write_to_the_source_thread(bot, config, thread, invo
         run(promoter.discover_webhooks())
     except ThreadWriteAttempt as exc:  # pragma: no cover
         pytest.fail(str(exc))
+
+
+def test_pins_survive_a_lost_checkpoint(bot, config, thread, invoker, guild):
+    """Pins must not depend on the checkpoint surviving.
+
+    Everything else about resuming was made independent of it: the channel is
+    the record. Pins were the exception, accumulated in the checkpoint during
+    the replay and lost with it.
+    """
+    messages = populate(thread, 4)
+    messages[1].pinned = True
+    messages[3].pinned = True
+
+    first = make_promoter(bot, config, thread, invoker)
+    run(first.run())
+    assert len(guild.channel.pinned) == 2
+
+    # Same channel, same content, but the checkpoint is gone.
+    guild.channel.pinned.clear()
+    second = make_promoter(bot, config, thread, invoker)
+    second.checkpoint.target_channel_id = guild.channel.id
+    second.checkpoint.pinned_source_ids.clear()
+    run(second.run())
+
+    assert len(guild.channel.pinned) == 2, "pins were lost with the checkpoint"
+
+
+def test_pins_are_restored_in_chronological_order(bot, config, thread, invoker, guild):
+    """Discord lists pins newest first; the target must not end up reversed."""
+    messages = populate(thread, 5)
+    for i in (0, 2, 4):
+        messages[i].pinned = True
+
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.run())
+
+    ordre = [promoter.checkpoint.translated(messages[i].id) for i in (0, 2, 4)]
+    assert guild.channel.pinned == ordre, "pins were restored out of order"
+
+
+def test_unreadable_pins_fall_back_to_the_checkpoint(bot, config, thread, invoker, guild):
+    messages = populate(thread, 3)
+    messages[1].pinned = True
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+    run(promoter._replay_one(messages[1], 1))
+
+    thread.pins_forbidden = True
+    run(promoter._restore_pins())
+    assert len(guild.channel.pinned) == 1, "the checkpoint should have covered it"
+
+
+def test_the_checkpoint_is_not_rewritten_on_every_message(bot, config, thread, invoker):
+    """Rewriting it per message costs tens of gigabytes on a large thread.
+
+    Safe to batch precisely because the checkpoint is not the authority: the
+    channel is, so losing a few entries costs one extra read.
+    """
+    from app.promoter import CHECKPOINT_EVERY
+
+    populate(thread, CHECKPOINT_EVERY * 2)
+    promoter = make_promoter(bot, config, thread, invoker)
+
+    ecritures = {"n": 0}
+    vrai_save = promoter.store.save
+
+    def compte(checkpoint):
+        ecritures["n"] += 1
+        return vrai_save(checkpoint)
+
+    promoter.store.save = compte
+    run(promoter.run())
+
+    assert promoter.progress.sent == CHECKPOINT_EVERY * 2
+    assert ecritures["n"] < CHECKPOINT_EVERY, (
+        f"{ecritures['n']} writes for {CHECKPOINT_EVERY * 2} messages, still per-message"
+    )
+
+
+def test_a_batched_checkpoint_still_resumes_without_duplicating(bot, config, thread, invoker, guild):
+    """The point of batching: what is lost is recoverable from the channel."""
+    populate(thread, 8)
+    first = make_promoter(bot, config, thread, invoker)
+    run(first.run())
+    avant = replayed_source_ids(guild.channel)
+
+    # Simulate a hard stop: the checkpoint lags behind what the channel holds.
+    second = make_promoter(bot, config, thread, invoker)
+    second.checkpoint.target_channel_id = guild.channel.id
+    second.checkpoint.last_source_id = 1002
+    second.checkpoint.id_map.clear()
+    run(second.run())
+
+    assert replayed_source_ids(guild.channel) == avant, "a lagging checkpoint caused a re-replay"
+    assert second.checkpoint.id_map, "the id map should have been rebuilt from the channel"

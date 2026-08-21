@@ -158,11 +158,15 @@ def test_a_later_run_adds_to_the_archive(tmp_path):
 
 
 def test_replaying_a_message_twice_keeps_one_entry(tmp_path):
+    """Deduplication happens at flush: what lands on disk is what matters."""
     manifest = Manifest(tmp_path, 1)
     manifest.add_message({"source_id": 10, "content": "first attempt"})
     manifest.add_message({"source_id": 10, "content": "after recovery"})
-    assert len(manifest.payload["messages"]) == 1
-    assert manifest.payload["messages"][0]["content"] == "after recovery"
+    manifest.flush()
+
+    messages = json.loads((tmp_path / "1.json").read_text())["messages"]
+    assert len(messages) == 1
+    assert messages[0]["content"] == "after recovery"
 
 
 def test_the_archive_stays_in_chronological_order(tmp_path):
@@ -170,7 +174,30 @@ def test_the_archive_stays_in_chronological_order(tmp_path):
     manifest = Manifest(tmp_path, 1)
     for source_id in (30, 10, 20):
         manifest.add_message({"source_id": source_id, "index": 1})
-    assert [m["source_id"] for m in manifest.payload["messages"]] == [10, 20, 30]
+    manifest.flush()
+
+    messages = json.loads((tmp_path / "1.json").read_text())["messages"]
+    assert [m["source_id"] for m in messages] == [10, 20, 30]
+
+
+def test_adding_a_message_stays_cheap_at_scale(tmp_path):
+    """Sorting on every add was quadratic: half a billion comparisons at 30k.
+
+    This pins the cost rather than the result: a regression here does not break
+    the archive, it makes a large replay crawl, which is far harder to notice.
+    """
+    import time
+
+    manifest = Manifest(tmp_path, 1)
+    debut = time.perf_counter()
+    for source_id in range(20_000, 0, -1):
+        manifest.add_message({"source_id": source_id})
+    ecoule = time.perf_counter() - debut
+    assert ecoule < 1.0, f"20k inserts took {ecoule:.1f}s, add_message is not linear"
+
+    manifest.flush()
+    messages = json.loads((tmp_path / "1.json").read_text())["messages"]
+    assert messages[0]["source_id"] == 1 and messages[-1]["source_id"] == 20_000
 
 
 def test_a_warning_is_not_repeated_across_runs(tmp_path):

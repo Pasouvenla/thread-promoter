@@ -293,12 +293,27 @@ class FakeThread:
         self.created_at = dt.datetime(2023, 1, 1, tzinfo=dt.UTC)
         self.messages: list[FakeMessage] = []
         self._private = False
+        self.pins_forbidden = False
 
     def is_private(self) -> bool:
         return self._private
 
     async def fetch_members(self):
         return []
+
+    def pins(self, *, limit=50, before=None, oldest_first=False):
+        """Discord answers this from the channel itself, not from our records."""
+        if self.pins_forbidden:
+            raise discord.Forbidden(_Response(403), "no access")
+        epingles = [m for m in self.messages if m.pinned]
+        if not oldest_first:
+            epingles = list(reversed(epingles))
+
+        async def gen():
+            for message in epingles[:limit]:
+                yield message
+
+        return gen()
 
     async def fetch_message(self, message_id: int) -> FakeMessage:
         for message in self.messages:

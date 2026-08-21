@@ -184,22 +184,34 @@ class Manifest:
             self.payload["target_channel"] = target
 
     def add_message(self, entry: dict[str, Any]) -> None:
-        """Add or replace, then keep the archive in chronological order.
+        """Append now, tidy at flush.
+
+        Deduplicating and sorting on every call is invisible on a small thread
+        and quadratic on a large one: a thirty thousand message replay spent
+        half a billion comparisons keeping a list ordered that nobody reads
+        until the end.
+        """
+        self.payload["messages"].append(entry)
+
+    def _tidy(self) -> None:
+        """Deduplicate by source id, keeping the last, then order by snowflake.
 
         Ordering is by source id rather than by index: a snowflake encodes its
         own creation time, while index restarts at one on every resume.
         """
-        source_id = entry.get("source_id")
-        messages = [m for m in self.payload["messages"] if m.get("source_id") != source_id]
-        messages.append(entry)
-        messages.sort(key=lambda m: m.get("source_id") or 0)
-        self.payload["messages"] = messages
+        derniere: dict[Any, dict[str, Any]] = {}
+        for message in self.payload["messages"]:
+            derniere[message.get("source_id")] = message
+        self.payload["messages"] = sorted(
+            derniere.values(), key=lambda m: m.get("source_id") or 0
+        )
 
     def warn(self, message: str) -> None:
         if message not in self.payload["warnings"]:
             self.payload["warnings"].append(message)
 
     def flush(self) -> None:
+        self._tidy()
         tmp = self.path.with_suffix(".tmp")
         tmp.write_text(
             json.dumps(self.payload, ensure_ascii=False, indent=2, default=str),

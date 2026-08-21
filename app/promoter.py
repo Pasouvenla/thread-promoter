@@ -63,6 +63,14 @@ RECOVERABLE = (discord.HTTPException, aiohttp.ClientError, asyncio.TimeoutError,
 
 RETRY_BACKOFF = (2.0, 5.0, 12.0)
 
+# Messages between checkpoint writes. Saving after every single one rewrites
+# the whole file each time: on a thirty thousand message thread the checkpoint
+# grows past a megabyte and the run ends up writing tens of gigabytes for
+# nothing, with one fsync per message. Batching is safe here precisely because
+# the checkpoint is not the authority: a resume reads the channel, so losing a
+# few entries costs one extra read and never a duplicate.
+CHECKPOINT_EVERY = 25
+
 # How far back to look in the target channel for the resume point. Generous
 # enough to step over a header, a failure report and a recovery prompt.
 RESUME_LOOKBACK = 200
@@ -297,7 +305,10 @@ class ThreadPromoter:
         if last_source_id is None:
             return None
 
-        if not self.checkpoint.id_map:
+        # Batched checkpoints mean the map can lag behind the channel after a
+        # hard stop. Rebuild whenever the last replayed message is missing from
+        # it, not only when it is empty, or replies would point nowhere.
+        if not self.checkpoint.id_map or str(last_source_id) not in self.checkpoint.id_map:
             log.info("Rebuilding the id map from channel %s", self.channel.id)
             async for message in self.channel.history(limit=None, oldest_first=True):
                 found = source_id_from_replay(message.content)
@@ -1039,8 +1050,26 @@ class ThreadPromoter:
 
     # ----------------------------------------------------------- orchestration
 
+    async def _pinned_source_ids(self) -> list[int]:
+        """Which source messages are pinned, asked of the source itself.
+
+        Everything else about resuming was made independent of the checkpoint,
+        because the channel is the record. Pins were the exception: they were
+        accumulated while replaying and vanished with the file. The thread
+        knows its own pins, so it is asked, oldest first so the target ends up
+        in the same order.
+
+        Falls back to whatever the checkpoint holds if the source cannot be
+        read, which is still better than nothing.
+        """
+        try:
+            return [message.id async for message in self.thread.pins(oldest_first=True)]
+        except (discord.HTTPException, *TRANSIENT) as exc:
+            log.warning("Pins unreadable from the source (%s), using the checkpoint", exc)
+            return list(self.checkpoint.pinned_source_ids)
+
     async def _restore_pins(self) -> None:
-        for source_id in self.checkpoint.pinned_source_ids:
+        for source_id in await self._pinned_source_ids():
             new_id = self.checkpoint.translated(source_id)
             if not new_id:
                 continue
@@ -1115,6 +1144,7 @@ class ThreadPromoter:
 
         index = 0
         aborted = False
+        depuis_sauvegarde = 0
         async for message in self._iter_source(resume_after):
             if self.abort_requested:
                 aborted = True
@@ -1122,11 +1152,17 @@ class ThreadPromoter:
             index += 1
             try:
                 await self._replay_one(message, index)
+                depuis_sauvegarde += 1
             except RECOVERABLE as exc:
                 log.warning("Failure on message %s: %s", message.id, exc)
                 await self._handle_failure(message, index, exc)
+                # A failure is worth persisting straight away: it is what the
+                # recovery pass works from, and it is rare enough to afford.
+                depuis_sauvegarde = CHECKPOINT_EVERY
             finally:
-                self.store.save(self.checkpoint)
+                if depuis_sauvegarde >= CHECKPOINT_EVERY:
+                    self.store.save(self.checkpoint)
+                    depuis_sauvegarde = 0
                 await self.update_status(self.status_line("Replay in progress:"))
             await asyncio.sleep(self.config.message_delay)
 
