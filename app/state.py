@@ -38,6 +38,9 @@ class Checkpoint:
     last_source_id: int | None = None
     source_total: int | None = None
     id_map: dict[str, int] = field(default_factory=dict)
+    # Webhooks seen publishing in the source, collected while replaying so that
+    # /promote-webhooks does not have to walk the whole history again.
+    seen_webhook_ids: list[int] = field(default_factory=list)
     skipped_source_ids: list[int] = field(default_factory=list)
     pinned_source_ids: list[int] = field(default_factory=list)
     failures: list[dict[str, Any]] = field(default_factory=list)
@@ -71,6 +74,7 @@ class Checkpoint:
         self.last_source_id = None
         self.source_total = None
         self.id_map.clear()
+        self.seen_webhook_ids.clear()
         self.skipped_source_ids.clear()
         self.pinned_source_ids.clear()
         self.failures.clear()

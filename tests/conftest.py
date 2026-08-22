@@ -190,6 +190,13 @@ class FakeChannel(discord.TextChannel):
         self.edits: list[tuple[int, dict]] = []
         self.webhook = FakeWebhook(self)
         self.next_id = 20_000
+        self.guild = None
+        # What the bot can actually do here. The real failure was a channel the
+        # bot created and then could not see, so this must be simulable.
+        self.bot_permissions = discord.Permissions.all()
+
+    def permissions_for(self, _member):
+        return self.bot_permissions
 
     async def send(self, content: str | None = None, **kwargs) -> FakeSent:
         self.next_id += 1
@@ -227,7 +234,11 @@ class FakeGuild:
     async def create_text_channel(self, **kwargs) -> FakeChannel:
         self.created_channels.append(kwargs)
         self.channel.name = kwargs.get("name", "promoted")
+        self.channel.guild = self
         return self.channel
+
+    async def fetch_member(self, member_id: int):
+        return self.me or FakeAuthor(1, "promoter-bot")
 
     def get_channel(self, channel_id: int):
         """Always a miss, like a cache that never saw a channel it cannot view.
@@ -410,6 +421,7 @@ class FakeThread(discord.Thread):
 class FakeBot:
     def __init__(self, guild: FakeGuild) -> None:
         self.guild = guild
+        self.user = FakeAuthor(1, "promoter-bot")
         self.missing_channels: set[int] = set()
         self.unreachable = False
 

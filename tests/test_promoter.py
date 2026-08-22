@@ -1035,3 +1035,102 @@ def test_history_is_read_page_by_page_not_all_at_once(bot, config, thread, invok
     run(collecte())
     assert 99999 in vus, "a message added after page one was never seen"
     assert len(vus) == 251
+
+
+def test_webhooks_are_noted_during_the_replay(bot, config, thread, invoker):
+    """Rediscovering them later means walking the whole thread again.
+
+    On a thirty thousand message thread that is 300 API calls and several
+    minutes, long enough to risk outliving the interaction it answers.
+    """
+    author = FakeAuthor(2, "alice")
+    thread.messages.append(FakeMessage(6000, author, "from a bot", channel_id=thread.id, webhook_id=111))
+    populate(thread, 3)
+    thread.parent.hooks = [_hook(111, "Dofus Bot", "dofus")]
+
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.run())
+    assert promoter.checkpoint.seen_webhook_ids == [111]
+
+
+def test_discovery_uses_what_the_replay_noted_instead_of_rereading(bot, config, thread, invoker):
+    author = FakeAuthor(2, "alice")
+    thread.messages.append(FakeMessage(6100, author, "x", channel_id=thread.id, webhook_id=222))
+    populate(thread, 2)
+    thread.parent.hooks = [_hook(222, "Some bot")]
+
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.run())
+
+    lectures = {"n": 0}
+    original = promoter._iter_source
+
+    def compte(after_id):
+        lectures["n"] += 1
+        return original(after_id)
+
+    promoter._iter_source = compte
+    found = run(promoter.discover_webhooks())
+
+    assert [f["id"] for f in found] == [222]
+    assert lectures["n"] == 0, "the thread was walked again for nothing"
+
+
+def test_discovery_still_works_without_a_record(bot, config, thread, invoker):
+    """A channel promoted by an older build, or with /promote-link, has none."""
+    author = FakeAuthor(2, "alice")
+    thread.messages.append(FakeMessage(6200, author, "x", channel_id=thread.id, webhook_id=333))
+    thread.parent.hooks = [_hook(333, "Legacy bot")]
+
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+    promoter.checkpoint.seen_webhook_ids.clear()
+
+    found = run(promoter.discover_webhooks())
+    assert [f["id"] for f in found] == [333], "the fallback should still find it"
+
+
+def test_the_bot_always_gets_access_to_the_channel_it_creates(bot, config, thread, invoker, guild):
+    """A closed channel the bot cannot see is one it cannot pin in.
+
+    Messages still land, because the webhook carries its own right to post,
+    which is precisely what makes this failure quiet: thirty thousand messages
+    arrive and every pin silently 403s.
+    """
+    populate(thread, 2)
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+
+    overwrites = guild.created_channels[0]["overwrites"]
+    assert guild.me in overwrites, "the bot has no overwrite of its own"
+    acces = overwrites[guild.me]
+    assert acces.view_channel is True
+    assert acces.manage_messages is True, "no Manage Messages means no pins"
+    assert acces.manage_webhooks is True
+
+
+def test_the_bot_access_does_not_depend_on_a_warm_cache(bot, config, thread, invoker, guild):
+    """guild.me reads a cache that can be empty, and returning None there is
+    how the bot ended up locked out of a channel it had just created."""
+    populate(thread, 2)
+    guild.me = None
+    promoter = make_promoter(bot, config, thread, invoker)
+    run(promoter.prepare())
+
+    overwrites = guild.created_channels[0]["overwrites"]
+    membres = [o for o in overwrites if getattr(o, "name", None) == "promoter-bot"]
+    assert membres, "the member should have been fetched rather than skipped"
+
+
+def test_a_channel_the_bot_cannot_work_in_fails_loudly(bot, config, thread, invoker, guild):
+    """Discovering this five hours into a replay is too late."""
+    populate(thread, 2)
+    guild.channel.bot_permissions = discord.Permissions(view_channel=True, send_messages=True)
+
+    promoter = make_promoter(bot, config, thread, invoker)
+    with pytest.raises(PromotionError) as caught:
+        run(promoter.prepare())
+
+    message = str(caught.value)
+    assert "Manage Messages" in message, "it should name what is missing"
+    assert "cannot work in it" in message

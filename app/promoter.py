@@ -198,7 +198,19 @@ class ThreadPromoter:
         log.info("Resuming into existing channel %s", channel.id)
         return channel
 
-    def _target_overwrites(self) -> dict:
+    async def _self_member(self):
+        """The bot's own member object, fetched if the cache does not have it.
+
+        guild.me reads a cache that can be empty, and returning None there is
+        how the bot ended up locked out of a channel it had just created.
+        """
+        me = self.thread.guild.me
+        if me is not None:
+            return me
+        log.warning("Bot member absent from cache, fetching it")
+        return await self.thread.guild.fetch_member(self.bot.user.id)
+
+    async def _target_overwrites(self) -> dict:
         """Start closed, so a replay does not flood a whole server.
 
         Pouring thirty thousand messages into an open channel marks it unread
@@ -211,16 +223,19 @@ class ThreadPromoter:
         for the promotion, and one chosen role can see it.
         """
         guild = self.thread.guild
+        # The bot's own access is not optional and not conditional: a closed
+        # channel it cannot see is one it cannot pin in, cannot verify, and
+        # cannot resume into. Messages still land, because the webhook carries
+        # its own right to post, which is exactly what makes the failure quiet.
+        me = await self._self_member()
         overwrites = {
             guild.default_role: discord.PermissionOverwrite(view_channel=False),
-        }
-        me = guild.me
-        if me is not None:
-            overwrites[me] = discord.PermissionOverwrite(
+            me: discord.PermissionOverwrite(
                 view_channel=True, send_messages=True, manage_messages=True,
                 manage_webhooks=True, embed_links=True, attach_files=True,
                 add_reactions=True, read_message_history=True,
-            )
+            ),
+        }
         invoker = guild.get_member(self.invoker.id) or self.invoker
         overwrites[invoker] = discord.PermissionOverwrite(
             view_channel=True, send_messages=True, read_message_history=True
@@ -263,7 +278,7 @@ class ThreadPromoter:
             raise PromotionError("The parent channel of this thread cannot be reached.")
 
         name = slugify_channel_name(self.target_name or self.thread.name)
-        overwrites = self._target_overwrites()
+        overwrites = await self._target_overwrites()
         if self.thread.is_private():
             # A private thread's participants are carried over so they keep
             # access once the channel is opened up.
@@ -281,6 +296,24 @@ class ThreadPromoter:
             overwrites=overwrites,
             reason=f"Thread {self.thread.id} promoted by {self.invoker}",
         )
+        # Verified rather than assumed: the whole point of the overwrite above
+        # is that the bot keeps working in a channel nobody else can see, and
+        # discovering otherwise five hours into a replay is too late.
+        me = await self._self_member()
+        acquis = channel.permissions_for(me)
+        manquant = [nom for nom, ok in (
+            ("View Channel", acquis.view_channel),
+            ("Send Messages", acquis.send_messages),
+            ("Manage Messages", acquis.manage_messages),
+            ("Manage Webhooks", acquis.manage_webhooks),
+        ) if not ok]
+        if manquant:
+            raise PromotionError(
+                f"The channel was created but I cannot work in it, missing: "
+                f"{', '.join(manquant)}. Delete #{channel.name} and check that "
+                f"the bot's role is allowed to manage channels and messages."
+            )
+
         self.checkpoint.target_channel_id = channel.id
         self.store.save(self.checkpoint)
         return channel
@@ -584,6 +617,10 @@ class ThreadPromoter:
             return
 
         self.author_labels[message.id] = author_label(message)
+        # Noted in passing: the replay already reads every message, so finding
+        # the webhooks later costs nothing rather than a second full pass.
+        if message.webhook_id and message.webhook_id not in self.checkpoint.seen_webhook_ids:
+            self.checkpoint.seen_webhook_ids.append(message.webhook_id)
 
         reactions = await self._collect_reactions(message)
         payload = await self._compose(message, reactions)
@@ -862,9 +899,16 @@ class ThreadPromoter:
         nothing to do with this thread.
         """
         counts: dict[int, int] = {}
-        async for message in self._iter_source(None):
-            if message.webhook_id:
-                counts[message.webhook_id] = counts.get(message.webhook_id, 0) + 1
+        if self.checkpoint.seen_webhook_ids:
+            # Collected during the replay. Walking 30 000 messages again to
+            # rediscover what we already saw takes minutes and can outlive the
+            # interaction it answers.
+            counts = dict.fromkeys(self.checkpoint.seen_webhook_ids, 0)
+        else:
+            log.info("No webhook recorded, walking the thread to find them")
+            async for message in self._iter_source(None):
+                if message.webhook_id:
+                    counts[message.webhook_id] = counts.get(message.webhook_id, 0) + 1
         if not counts:
             return []
 
